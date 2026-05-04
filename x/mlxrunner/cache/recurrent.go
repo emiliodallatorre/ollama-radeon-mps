@@ -1,6 +1,10 @@
 package cache
 
-import "github.com/ollama/ollama/x/mlxrunner/mlx"
+import (
+	"github.com/ollama/ollama/x/mlxrunner/batch"
+	"github.com/ollama/ollama/x/mlxrunner/mlx"
+	"github.com/ollama/ollama/x/models/nn"
+)
 
 // RecurrentCache stores state for linear-recurrent layers.
 //
@@ -18,42 +22,20 @@ type RecurrentCache struct {
 	headKDim  int
 }
 
-func (c *RecurrentCache) setStateRaw(old, v *mlx.Array) *mlx.Array {
+func (c *RecurrentCache) setState(old, v *mlx.Array, contiguous bool) *mlx.Array {
 	if v == nil || !v.Valid() {
 		return old
 	}
-	if old == v {
-		return old
+
+	if contiguous {
+		v = mlx.Contiguous(v, false)
 	}
+	v = v.Clone()
 
 	mlx.Pin(v)
-	if old != nil && old != v {
-		mlx.Unpin(old)
-	}
+	mlx.Unpin(old)
 
 	return v
-}
-
-func (c *RecurrentCache) setStateDetached(old, v *mlx.Array, ensureContiguous bool) *mlx.Array {
-	if v == nil || !v.Valid() {
-		return old
-	}
-	if old == v {
-		return old
-	}
-
-	root := v
-	if ensureContiguous {
-		root = mlx.Contiguous(v, false)
-	}
-	detached := root.Clone()
-
-	mlx.Pin(detached)
-	if old != nil && old != detached {
-		mlx.Unpin(old)
-	}
-
-	return detached
 }
 
 func NewRecurrentCache(convTail, convDim, numVHeads, headVDim, headKDim int32) *RecurrentCache {
@@ -80,37 +62,31 @@ func (c *RecurrentCache) ensure(batch int, dtype mlx.DType) {
 	}
 
 	if needConv {
-		c.convState = c.setStateRaw(c.convState, mlx.Zeros(dtype, batch, c.convTail, c.convDim))
+		c.convState = c.setState(c.convState, mlx.Zeros(dtype, batch, c.convTail, c.convDim), false)
 	}
 	if needDelta {
-		c.deltaState = c.setStateRaw(c.deltaState, mlx.Zeros(dtype, batch, c.numVHeads, c.headVDim, c.headKDim))
+		c.deltaState = c.setState(c.deltaState, mlx.Zeros(dtype, batch, c.numVHeads, c.headVDim, c.headKDim), false)
 	}
 }
 
-func (c *RecurrentCache) ConvState(batch int, dtype mlx.DType) *mlx.Array {
-	c.ensure(batch, dtype)
-	return c.convState
+// Get returns the current conv/delta state for the SSM layer's read
+// phase. Lazy-initializes zero-filled state tensors using b.InputIDs
+// for the batch size; reallocates if the existing state's batch size
+// or dtype no longer matches.
+func (c *RecurrentCache) Get(b *batch.Batch, dtype mlx.DType) *nn.RecurrentHistory {
+	c.ensure(b.InputIDs.Dim(0), dtype)
+	return nn.NewRecurrentHistory(c.convState, c.deltaState)
 }
 
-func (c *RecurrentCache) SetConvState(v *mlx.Array) {
-	c.convState = c.setStateDetached(c.convState, v, true)
-}
-
-func (c *RecurrentCache) DeltaState(batch int, dtype mlx.DType) *mlx.Array {
-	c.ensure(batch, dtype)
-	return c.deltaState
-}
-
-func (c *RecurrentCache) SetDeltaState(v *mlx.Array) {
-	c.deltaState = c.setStateDetached(c.deltaState, v, false)
-}
-
-func (c *RecurrentCache) Advance(n int) {
-	c.offset += n
-}
-
-func (c *RecurrentCache) Update(keys, values *mlx.Array) (*mlx.Array, *mlx.Array) {
-	return keys, values
+// Put stores the post-computation conv/delta states for the SSM
+// layer's write phase and advances the cache offset by the current
+// forward's real token count.
+//
+// Assumes B = 1; heterogeneous batches are not supported.
+func (c *RecurrentCache) Put(b *batch.Batch, newConv, newDelta *mlx.Array) {
+	c.convState = c.setState(c.convState, newConv, true)
+	c.deltaState = c.setState(c.deltaState, newDelta, false)
+	c.offset += int(b.SeqQueryLens[0])
 }
 
 func (c *RecurrentCache) State() []*mlx.Array {
@@ -150,15 +126,15 @@ func (c *RecurrentCache) Restore(snapshot Snapshot, target int) bool {
 
 	snap := snapshot.(*recurrentSnapshot)
 
-	// Recurrent state encodes all tokens up to snap.offset. Restoring
-	// to a target before that would leave stale state from tokens
-	// [target, snap.offset) baked in. Only allow restoring forward.
-	if target < snap.offset {
+	// Recurrent snapshots encode cumulative state up to exactly
+	// snap.offset. Target must match — rewinding would leave stale
+	// state, and advancing isn't possible without feeding tokens.
+	if target != snap.offset {
 		return false
 	}
 
-	c.convState = c.setStateRaw(c.convState, snap.convState)
-	c.deltaState = c.setStateRaw(c.deltaState, snap.deltaState)
+	c.convState = c.setState(c.convState, snap.convState, false)
+	c.deltaState = c.setState(c.deltaState, snap.deltaState, false)
 	c.offset = snap.offset
 
 	return true
