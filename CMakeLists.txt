@@ -20,7 +20,7 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 option(OLLAMA_FETCH_MOLTENVK "Download MoltenVK for building ggml-vulkan on macOS" OFF)
-set(OLLAMA_MOLTENVK_VERSION "1.4.0" CACHE STRING "MoltenVK release to fetch when OLLAMA_FETCH_MOLTENVK=ON")
+set(OLLAMA_MOLTENVK_VERSION "1.4.1" CACHE STRING "MoltenVK release to fetch when OLLAMA_FETCH_MOLTENVK=ON")
 set(OLLAMA_MOLTENVK_URL "" CACHE STRING "Override MoltenVK archive URL")
 set(OLLAMA_MOLTENVK_SHA256 "" CACHE STRING "Optional SHA256 checksum for the MoltenVK archive")
 
@@ -191,22 +191,20 @@ if(APPLE AND OLLAMA_FETCH_MOLTENVK)
     set(OLLAMA_MOLTENVK_RUNTIME "${Vulkan_LIBRARY}")
 endif()
 
-if(NOT APPLE OR OLLAMA_FETCH_MOLTENVK)
-    find_package(Vulkan)
-    if(Vulkan_FOUND)
-        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/ml/backend/ggml/ggml/src/ggml-vulkan)
-        target_include_directories(ggml-vulkan PRIVATE ${GGML_INCLUDE_DIRS})
-        install(TARGETS ggml-vulkan
-            RUNTIME_DEPENDENCIES
-                PRE_INCLUDE_REGEXES vulkan
-                PRE_EXCLUDE_REGEXES ".*"
-            RUNTIME DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT Vulkan
-            LIBRARY DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT Vulkan
-            FRAMEWORK DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT Vulkan
-        )
-        if(APPLE AND OLLAMA_FETCH_MOLTENVK AND OLLAMA_MOLTENVK_RUNTIME AND EXISTS "${OLLAMA_MOLTENVK_RUNTIME}")
-            install(FILES "${OLLAMA_MOLTENVK_RUNTIME}" DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT Vulkan)
-        endif()
+find_package(Vulkan)
+if(Vulkan_FOUND)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/ml/backend/ggml/ggml/src/ggml-vulkan)
+    target_include_directories(ggml-vulkan PRIVATE ${GGML_INCLUDE_DIRS})
+    install(TARGETS ggml-vulkan
+        RUNTIME_DEPENDENCIES
+            PRE_INCLUDE_REGEXES vulkan
+            PRE_EXCLUDE_REGEXES ".*"
+        RUNTIME DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT Vulkan
+        LIBRARY DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT Vulkan
+        FRAMEWORK DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT Vulkan
+    )
+    if(OLLAMA_FETCH_MOLTENVK AND OLLAMA_MOLTENVK_RUNTIME AND EXISTS "${OLLAMA_MOLTENVK_RUNTIME}")
+        install(FILES "${OLLAMA_MOLTENVK_RUNTIME}" DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT Vulkan)
     endif()
 endif()
 
